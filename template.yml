@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda (python3.13) with inline code + DynamoDB table (simple insert)
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+
+Resources:
+  MyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'MyTable-${Env}'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'lambda-exec-role-${Env}-${AWS::AccountId}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoTableAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt MyTable.Arn
+
+  MyLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'my-lambda-${Env}'
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import time
+          from datetime import datetime
+          import boto3
+
+          TABLE_NAME = os.environ.get("TABLE_NAME")
+          dynamodb = boto3.resource("dynamodb")
+
+          def lambda_handler(event, context):
+              if not TABLE_NAME:
+                  return {"statusCode": 500, "body": "TABLE_NAME environment variable not set"}
+
+              item_id = str(int(time.time() * 1000))
+              item = {
+                  "id": item_id,
+                  "createdAt": datetime.utcnow().isoformat() + "Z",
+                  "payload": event
+              }
+              try:
+                  table = dynamodb.Table(TABLE_NAME)
+                  table.put_item(Item=item)
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({"id": item_id, "message": "Inserted"})
+                  }
+              except Exception as e:
+                  return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MyTable
+      Timeout: 10
+      MemorySize: 128
+
+Outputs:
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref MyTable
+
+  LambdaName:
+    Description: Lambda function name
+    Value: !Ref MyLambda
