@@ -16,11 +16,12 @@ pipeline {
     stage('Deploy CloudFormation') {
       steps {
         sh '''
-          # Ensure aws cli is present (EC2 should have it)
+          # Ensure aws cli is present
           if ! command -v aws >/dev/null 2>&1; then
             python3 -m pip install --user awscli
             export PATH=$HOME/.local/bin:$PATH
           fi
+
           export AWS_REGION=${REGION}
           export AWS_DEFAULT_REGION=${REGION}
           echo "Deploying CloudFormation..."
@@ -36,37 +37,50 @@ pipeline {
     stage('Smoke test: Invoke Lambda') {
       steps {
         sh '''
-          export AWS_REGION=${REGION}; export AWS_DEFAULT_REGION=${REGION}
-          aws lambda invoke --function-name ${LAMBDA_NAME} --payload '{"smoketest":true}' --cli-binary-format raw-in-base64-out /tmp/lambda_out.json --region ${REGION}
+          export AWS_REGION=${REGION}
+          export AWS_DEFAULT_REGION=${REGION}
+
+          # Invoke Lambda
+          aws lambda invoke --function-name ${LAMBDA_NAME} \
+            --payload '{"smoketest":true}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda_out.json --region ${REGION}
+
           cat /tmp/lambda_out.json
-          # Extract id using python
+
+          # Extract ID safely
           ID=$(python3 - <<'PY'
 import json
-d=json.load(open('/tmp/lambda_out.json'))
-p=d.get('Payload') or d
-if isinstance(p,str):
-    try:
-        inner=json.loads(p)
-    except:
-        inner={}
-else:
-    inner=p
-b=inner.get('body')
-if b:
-    try:
-        print(json.loads(b).get('id',''))
-    except:
+try:
+    d = json.load(open('/tmp/lambda_out.json'))
+    p = d.get('Payload') or d
+    if isinstance(p, str):
+        try:
+            p = json.loads(p)
+        except:
+            p = {}
+    body = p.get('body')
+    if body:
+        try:
+            print(json.loads(body).get('id',''))
+        except:
+            print('')
+    else:
         print('')
-else:
+except Exception:
     print('')
 PY
 )
           echo "Extracted ID: $ID"
+
           if [ -z "$ID" ]; then
             echo "Failed to extract ID from Lambda output" >&2
             exit 1
           fi
-          aws dynamodb get-item --table-name MyTable-${ENV} --key "{\"id\":{\"S\":\"${ID}\"}}" --region ${REGION}
+
+          # Correctly format JSON for DynamoDB get-item
+          KEY_JSON=$(printf '{"id":{"S":"%s"}}' "$ID")
+          aws dynamodb get-item --table-name MyTable-${ENV} --key "$KEY_JSON" --region ${REGION}
         '''
       }
     }
